@@ -1,0 +1,1 @@
+<*.{ml,mli}>|<whimper.{byte,d.byte,native}>: syntax(camlp4o), package(uint), package(extlib), package(sexplib), package(sexplib.syntax)
