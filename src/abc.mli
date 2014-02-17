@@ -15,11 +15,11 @@ type file = {
   file_scripts       : script array;
   file_method_bodies : method_body array;
 }
-and method_ref      = int
-and metadata_ref    = int
-and class_ref       = int
-and script_ref      = int
-and method_body_ref = int
+and method_ref      = private int
+and metadata_ref    = private int
+and class_ref       = private int
+and script_ref      = private int
+and method_body_ref = private int
 and constant_pool = {
   const_pool_integers   : int32 array;
   const_pool_uintegers  : uint32 array;
@@ -29,13 +29,13 @@ and constant_pool = {
   const_pool_ns_sets    : ns_set array;
   const_pool_multinames : multiname array;
 }
-and integer_ref   = int
-and uinteger_ref  = int
-and double_ref    = int
-and string_ref    = int
-and namespace_ref = int
-and ns_set_ref    = int
-and multiname_ref = int
+and integer_ref   = private int
+and uinteger_ref  = private int
+and double_ref    = private int
+and string_ref    = private int
+and namespace_ref = private int
+and ns_set_ref    = private int
+and multiname_ref = private int
 and constant_ref =
 | ConstInt                of integer_ref
 | ConstUInt               of uinteger_ref
@@ -174,3 +174,17 @@ with sexp
 
 val load_file : string -> file
 val dump_file : file -> string
+
+val integer     : file -> integer_ref     -> Int32.t
+val uinteger    : file -> uinteger_ref    -> Uint32.t
+val double      : file -> double_ref      -> float
+val string      : file -> string_ref      -> string
+val namespace   : file -> namespace_ref   -> namespace
+val ns_set      : file -> ns_set_ref      -> ns_set
+val multiname   : file -> multiname_ref   -> multiname
+val method_     : file -> method_ref      -> method_
+val metadata    : file -> metadata_ref    -> metadata
+val class_      : file -> class_ref       -> class_
+val script      : file -> script_ref      -> script
+val method_body : file -> method_body_ref -> method_body
+

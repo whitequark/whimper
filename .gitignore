@@ -2,3 +2,5 @@ _build/
 *.native
 *.byte
 *.d.byte
+*.sublime-project
+*.sublime-workspace

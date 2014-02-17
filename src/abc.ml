@@ -333,6 +333,19 @@ and exception_ = {
 }
 with sexp
 
+let integer     file idx = file.file_const_pool.const_pool_integers.(idx)
+let uinteger    file idx = file.file_const_pool.const_pool_uintegers.(idx)
+let double      file idx = file.file_const_pool.const_pool_doubles.(idx)
+let string      file idx = file.file_const_pool.const_pool_strings.(idx)
+let namespace   file idx = file.file_const_pool.const_pool_namespaces.(idx)
+let ns_set      file idx = file.file_const_pool.const_pool_ns_sets.(idx)
+let multiname   file idx = file.file_const_pool.const_pool_multinames.(idx)
+let method_     file idx = file.file_methods.(idx)
+let metadata    file idx = file.file_metadata.(idx)
+let class_      file idx = file.file_classes.(idx)
+let script      file idx = file.file_scripts.(idx)
+let method_body file idx = file.file_method_bodies.(idx)
+
 let load_file input =
   let r = Reader.create input in
   let rec read_some f cnt =
