@@ -2,6 +2,9 @@ module Reader : sig
   type t
 
   val create     : string -> t
+  val offset     : t -> int
+  val at_end     : t -> bool
+  val rewind     : t -> unit
 
   val read_u8    : t -> int
   val read_u16   : t -> int
@@ -20,7 +23,17 @@ end = struct
   let create source =
     { source; pos = 0 }
 
+  let offset r =
+    r.pos
+
+  let rewind r =
+    r.pos <- 0
+
+  let at_end r =
+    (String.length r.source) = r.pos
+
   let read_u8 r =
+    if r.pos = 0x465d then failwith "x";
     let u8 = Char.code r.source.[r.pos] in
     r.pos <- r.pos + 1;
     u8
@@ -35,7 +48,7 @@ end = struct
     let byte2 = read_u8 r in
     let byte3 = read_u8 r in
     let s24   = (byte3 lsl 16) lor (byte2 lsl 8) lor byte1 in
-    if s24 land 0x800000 <> 0 then s24 - 0x100000 else s24
+    if s24 land 0x800000 <> 0 then s24 - 0x1000000 else s24
 
   let read_u30 r =
     let rec read_part () =
@@ -82,6 +95,8 @@ module Writer : sig
   type t
 
   val create      : unit -> t
+  val offset      : t -> int
+  val clear       : t -> unit
   val to_string   : t -> string
 
   val write_u8    : t -> int -> unit
@@ -97,6 +112,12 @@ end = struct
 
   let create () =
     Buffer.create 0
+
+  let offset w =
+    Buffer.length w
+
+  let clear w =
+    Buffer.clear w
 
   let to_string w =
     Buffer.contents w
@@ -320,7 +341,7 @@ and method_body = {
   body_local_count      : (* u30 *) int;
   body_init_scope_depth : (* u30 *) int;
   body_max_scope_depth  : (* u30 *) int;
-  body_code             : string;
+  body_code             : opcodes;
   body_exceptions       : exception_ array;
   body_traits           : trait array;
 }
@@ -331,32 +352,669 @@ and exception_ = {
   exception_type     : string_ref;
   exception_var_name : string_ref;
 }
+(* http://www.anotherbigidea.com/javaswf/avm2/AVM2Instructions.html,
+   AVM2 source code and other sources *)
+and opcode =
+| (* 0x01; 0 -> 0 *) OpBkpt
+| (* 0x02; 0 -> 0 *) OpNop
+| (* 0x03; 1 -> 0 *) OpThrow
+| (* 0x04; 0 -> 1 *) OpGetSuper     of (* u30 property *) multiname_ref
+| (* 0x05; 1 -> 0 *) OpSetSuper     of (* u30 property *) multiname_ref
+| (* 0x06; 0 -> 0 *) OpDXNS         of (* u30 string *) string_ref
+| (* 0x07; 1 -> 0 *) OpDXNSLate
+| (* 0x08; 0 -> 0 *) OpKill         of (* u30 local_index *) int
+| (* 0x09; 0 -> 0 *) OpLabel
+| (* 0x0C; 2 -> 0 *) OpIfNlt        of (* s24 target *) int
+| (* 0x0D; 2 -> 0 *) OpIfNle        of (* s24 target *) int
+| (* 0x0E; 2 -> 0 *) OpIfNgt        of (* s24 target *) int
+| (* 0x0F; 2 -> 0 *) OpIfNge        of (* s24 target *) int
+| (* 0x10; 0 -> 0 *) OpJump         of (* s24 target *) int
+| (* 0x11; 1 -> 0 *) OpIfTrue       of (* s24 target *) int
+| (* 0x12; 1 -> 0 *) OpIfFalse      of (* s24 target *) int
+| (* 0x13; 2 -> 0 *) OpIfEq         of (* s24 target *) int
+| (* 0x14; 2 -> 0 *) OpIfNe         of (* s24 target *) int
+| (* 0x15; 2 -> 0 *) OpIfLt         of (* s24 target *) int
+| (* 0x16; 2 -> 0 *) OpIfLe         of (* s24 target *) int
+| (* 0x17; 2 -> 0 *) OpIfGt         of (* s24 target *) int
+| (* 0x18; 2 -> 0 *) OpIfGe         of (* s24 target *) int
+| (* 0x19; 2 -> 0 *) OpIfStrictEq   of (* s24 target *) int
+| (* 0x1A; 2 -> 0 *) OpIfStrictNe   of (* s24 target *) int
+| (* 0x1B; 1 -> 0 *) OpLookupSwitch of (* s24 default *) int *
+                                       (* u30 case_count; s24[] case_offsets *) int array
+| (* 0x1C; 1 -> 0 *) OpPushWith
+| (* 0x1D; 0 -> 0 *) OpPopScope
+| (* 0x1E; 2 -> 1 *) OpNextName
+| (* 0x1F; 2 -> 1 *) OpHasNext
+| (* 0x20; 0 -> 1 *) OpPushNull
+| (* 0x21; 0 -> 1 *) OpPushUndefined
+| (* 0x23; 2 -> 1 *) OpNextValue
+| (* 0x24; 0 -> 1 *) OpPushByte       of (* u8 value *)  int
+| (* 0x25; 0 -> 1 *) OpPushShort      of (* s32 value *) int32
+| (* 0x26; 0 -> 1 *) OpPushTrue
+| (* 0x27; 0 -> 1 *) OpPushFalse
+| (* 0x28; 0 -> 1 *) OpPushNan
+| (* 0x29; 1 -> 0 *) OpPop
+| (* 0x2A; 1 -> 2 *) OpDup
+| (* 0x2B; 2 -> 2 *) OpSwap
+| (* 0x2C; 0 -> 1 *) OpPushString     of (* u30 value *) string_ref
+| (* 0x2D; 0 -> 1 *) OpPushInt        of (* u30 value *) integer_ref
+| (* 0x2E; 0 -> 1 *) OpPushUint       of (* u30 value *) uinteger_ref
+| (* 0x2F; 0 -> 1 *) OpPushDouble     of (* u30 value *) double_ref
+| (* 0x30; 1 -> 0 *) OpPushScope
+| (* 0x31; 0 -> 0 *) OpPushNamespace  of (* u30 ns *) namespace_ref
+| (* 0x32; 0 -> 1 *) OpHasNext2       of (* u30 obj_reg *) int * (* u30 idx_reg *) int
+| (* 0x35; 1 -> 1 *) OpAlchemyLoadInt8
+| (* 0x36; 1 -> 1 *) OpAlchemyLoadInt16
+| (* 0x37; 1 -> 1 *) OpAlchemyLoadInt32
+| (* 0x38; 1 -> 1 *) OpAlchemyLoadFloat32
+| (* 0x39; 1 -> 1 *) OpAlchemyLoadFloat64
+| (* 0x3A; 2 -> 0 *) OpAlchemyStoreInt8
+| (* 0x3B; 2 -> 0 *) OpAlchemyStoreInt16
+| (* 0x3C; 2 -> 0 *) OpAlchemyStoreInt32
+| (* 0x3D; 2 -> 0 *) OpAlchemyStoreFloat32
+| (* 0x3E; 2 -> 0 *) OpAlchemyStoreFloat64
+| (* 0x40; 0 -> 1 *) OpNewFunction              of (* u30 method *) method_ref
+| (* 0x41; argc + 2 -> 1 *) OpCall              of (* u30 argc *) int
+| (* 0x42; argc + 1 -> 1 *) OpConstruct         of (* u30 argc *) int
+| (* 0x43; argc + 1 -> 1 *) OpCallMethod        of (* u30 slot_id *) int * (* u30 argc *) int
+| (* 0x44; argc + 1 -> 1 *) OpCallStatic        of (* u30 slot_id *) int * (* u30 argc *) int
+| (* 0x45; argc     -> 1 *) OpCallSuper         of (* u30 prop *) multiname_ref * (* u30 argc *) int
+| (* 0x46; argc     -> 1 *) OpCallProperty      of (* u30 prop *) multiname_ref * (* u30 argc *) int
+| (* 0x47; 0 -> 0 *) OpReturnVoid
+| (* 0x48; 1 -> 0 *) OpReturnValue
+| (* 0x49; argc + 1 -> 0 *) OpConstructSuper    of (* u30 argc *) int
+| (* 0x4A; argc     -> 1 *) OpConstructProperty of (* u30 prop *) multiname_ref * (* u30 argc *) int
+| (* 0x4C; argc     -> 1 *) OpCallPropertyLex   of (* u30 prop *) multiname_ref * (* u30 argc *) int
+| (* 0x4E; argc     -> 0 *) OpCallSuperVoid     of (* u30 prop *) multiname_ref * (* u30 argc *) int
+| (* 0x4F; argc     -> 0 *) OpCallPropertyVoid  of (* u30 prop *) multiname_ref * (* u30 argc *) int
+| (* 0x50; 1 -> 1 *) OpAlchemyExtend1
+| (* 0x51; 1 -> 1 *) OpAlchemyExtend8
+| (* 0x52; 1 -> 1 *) OpAlchemyExtend16
+| (* 0x53; argc + 1 -> 1 *) OpApplyType         of (* u30 argc *) int
+| (* 0x55; argc * 2 -> 1 *) OpNewObject         of (* u30 argc *) int
+| (* 0x56; argc     -> 1 *) OpNewArray          of (* u30 argc *) int
+| (* 0x57; 0 -> 1 *) OpNewActivation
+| (* 0x58; 1 -> 1 *) OpNewClass           of (* u30 class *) class_ref
+| (* 0x59; 0 -> 1 *) OpGetDescendants     of (* u30 prop *)  multiname_ref
+| (* 0x5A; 0 -> 1 *) OpNewCatch           of (* u30 catch *) int
+| (* 0x5D; 0 -> 1 *) OpFindPropertyStrict of (* u30 prop *)  multiname_ref
+| (* 0x5E; 0 -> 1 *) OpFindProperty       of (* u30 prop *)  multiname_ref
+| (* 0x5F; 0 -> 1 *) OpFindDef            of (* u30 prop *)  multiname_ref
+| (* 0x60; 0 -> 1 *) OpGetLex             of (* u30 prop *)  multiname_ref
+| (* 0x61; 1 -> 0 *) OpSetProperty        of (* u30 prop *)  multiname_ref
+| (* 0x62; 0 -> 1 *) OpGetLocal           of (* u30 local *) int
+| (* 0x63; 1 -> 0 *) OpSetLocal           of (* u30 local *) int
+| (* 0x64; 0 -> 1 *) OpGetGlobalScope
+| (* 0x65; 0 -> 1 *) OpGetScopeObject     of (* u8 index *) int
+| (* 0x66; 0 -> 1 *) OpGetProperty        of (* u30 prop *) multiname_ref
+| (* 0x68; 1 -> 0 *) OpInitProperty       of (* u30 prop *) multiname_ref
+| (* 0x6A; 0 -> 1 *) OpDeleteProperty     of (* u30 prop *) multiname_ref
+| (* 0x6C; 1 -> 1 *) OpGetSlot            of (* u30 slot_id *) int
+| (* 0x6D; 2 -> 0 *) OpSetSlot            of (* u30 slot_id *) int
+| (* 0x6E; 0 -> 1 *) OpGetGlobalSlot      of (* u30 slot_id *) int (* Deprecated *)
+| (* 0x6F; 1 -> 0 *) OpSetGlobalSlot      of (* u30 slot_id *) int (* Deprecated *)
+| (* 0x70; 1 -> 1 *) OpConvertS
+| (* 0x71; 1 -> 1 *) OpEscXelem
+| (* 0x72; 1 -> 1 *) OpEscXattr
+| (* 0x73; 1 -> 1 *) OpConvertI
+| (* 0x74; 1 -> 1 *) OpConvertU
+| (* 0x75; 1 -> 1 *) OpConvertD
+| (* 0x76; 1 -> 1 *) OpConvertB
+| (* 0x77; 1 -> 1 *) OpConvertO
+| (* 0x78; 1 -> 1 *) OpCheckFilter
+| (* 0x80; 1 -> 1 *) OpCoerce       of (* u30 type *) multiname_ref
+| (* 0x81; 1 -> 1 *) OpCoerceB (* Deprecated; use convert_b *)
+| (* 0x82; 1 -> 1 *) OpCoerceA
+| (* 0x83; 1 -> 1 *) OpCoerceI (* Deprecated; use convert_i *)
+| (* 0x84; 1 -> 1 *) OpCoerceD (* Deprecated; use convert_d *)
+| (* 0x85; 1 -> 1 *) OpCoerceS
+| (* 0x86; 1 -> 1 *) OpAsType       of (* u30 type *) multiname_ref
+| (* 0x87; 2 -> 1 *) OpAsTypeLate
+| (* 0x89; 1 -> 1 *) OpCoerceO
+| (* 0x90; 1 -> 1 *) OpNegate
+| (* 0x91; 1 -> 1 *) OpIncrement
+| (* 0x92; 0 -> 0 *) OpIncLocal     of (* u30 local *) int
+| (* 0x93; 1 -> 1 *) OpDecrement
+| (* 0x94; 0 -> 0 *) OpDecLocal     of (* u30 local *) int
+| (* 0x95; 1 -> 1 *) OpTypeOf
+| (* 0x96; 1 -> 1 *) OpNot
+| (* 0x97; 1 -> 1 *) OpBitNot
+| (* 0xA0; 2 -> 1 *) OpAdd
+| (* 0xA1; 2 -> 1 *) OpSubtract
+| (* 0xA2; 2 -> 1 *) OpMultiply
+| (* 0xA3; 2 -> 1 *) OpDivide
+| (* 0xA4; 2 -> 1 *) OpModulo
+| (* 0xA5; 2 -> 1 *) OpLshift
+| (* 0xA6; 2 -> 1 *) OpRshift
+| (* 0xA7; 2 -> 1 *) OpUrshift
+| (* 0xA8; 2 -> 1 *) OpBitAnd
+| (* 0xA9; 2 -> 1 *) OpBitOr
+| (* 0xAA; 2 -> 1 *) OpBitXor
+| (* 0xAB; 2 -> 1 *) OpEquals
+| (* 0xAC; 2 -> 1 *) OpStrictEquals
+| (* 0xAD; 2 -> 1 *) OpLessThan
+| (* 0xAE; 2 -> 1 *) OpLessEquals
+| (* 0xAF; 2 -> 1 *) OpGreaterThan
+| (* 0xB0; 2 -> 1 *) OpGreaterEquals
+| (* 0xB1; 2 -> 1 *) OpInstanceOf
+| (* 0xB2; 1 -> 1 *) OpIsType       of (* u30 type *) multiname_ref
+| (* 0xB3; 2 -> 1 *) OpIsTypeLate
+| (* 0xB4; 2 -> 1 *) OpIn
+| (* 0xC0; 1 -> 1 *) OpIncrementI
+| (* 0xC1; 1 -> 1 *) OpDecrementI
+| (* 0xC2; 0 -> 0 *) OpIncLocalI    of (* u30 local *) int
+| (* 0xC3; 0 -> 0 *) OpDecLocalI    of (* u30 local *) int
+| (* 0xC4; 1 -> 1 *) OpNegateI
+| (* 0xC5; 2 -> 1 *) OpAddI
+| (* 0xC6; 2 -> 1 *) OpSubtractI
+| (* 0xC7; 2 -> 1 *) OpMultiplyI
+| (* 0xD0; 0 -> 1 *) OpGetLocal0
+| (* 0xD1; 0 -> 1 *) OpGetLocal1
+| (* 0xD2; 0 -> 1 *) OpGetLocal2
+| (* 0xD3; 0 -> 1 *) OpGetLocal3
+| (* 0xD4; 1 -> 0 *) OpSetLocal0
+| (* 0xD5; 1 -> 0 *) OpSetLocal1
+| (* 0xD6; 1 -> 0 *) OpSetLocal2
+| (* 0xD7; 1 -> 0 *) OpSetLocal3
+| (* 0xEF; 0 -> 0 *) OpDebug        of (* u8 type *) int * (* u30 idx *)   int *
+                                       (* u8 reg *)  int * (* u30 extra *) int
+| (* 0xF0; 0 -> 0 *) OpDebugLine    of (* u30 line *) int
+| (* 0xF1; 0 -> 0 *) OpDebugFile    of (* u30 file *) string_ref
+| (* 0xF2; 0 -> 0 *) OpBkptLine
+| (* 0xF3; 0 -> 0 *) OpTimestamp
+and opcodes = opcode array
 with sexp
 
-let integer     file idx = file.file_const_pool.const_pool_integers.(idx)
-let uinteger    file idx = file.file_const_pool.const_pool_uintegers.(idx)
-let double      file idx = file.file_const_pool.const_pool_doubles.(idx)
-let string      file idx = file.file_const_pool.const_pool_strings.(idx)
-let namespace   file idx = file.file_const_pool.const_pool_namespaces.(idx)
-let ns_set      file idx = file.file_const_pool.const_pool_ns_sets.(idx)
-let multiname   file idx = file.file_const_pool.const_pool_multinames.(idx)
+let integer file idx =
+  if idx = 0 then Int32.zero
+  else file.file_const_pool.const_pool_integers.(idx - 1)
+
+let uinteger file idx =
+  if idx = 0 then Uint32.zero
+  else file.file_const_pool.const_pool_uintegers.(idx - 1)
+
+let double file idx =
+  if idx = 0 then 0.0
+  else file.file_const_pool.const_pool_doubles.(idx - 1)
+
+let string file idx =
+  if idx = 0 then ""
+  else file.file_const_pool.const_pool_strings.(idx - 1)
+
+let namespace file idx =
+  if idx = 0 then failwith "namespace #0"
+  else file.file_const_pool.const_pool_namespaces.(idx - 1)
+
+let ns_set file idx =
+  if idx = 0 then failwith "ns_set #0"
+  else file.file_const_pool.const_pool_ns_sets.(idx - 1)
+
+let multiname file idx =
+  if idx = 0 then failwith "multiname #0"
+  else file.file_const_pool.const_pool_multinames.(idx - 1)
+
 let method_     file idx = file.file_methods.(idx)
 let metadata    file idx = file.file_metadata.(idx)
+let instance    file idx = file.file_instances.(idx)
 let class_      file idx = file.file_classes.(idx)
 let script      file idx = file.file_scripts.(idx)
 let method_body file idx = file.file_method_bodies.(idx)
 
+let string_of_namespace file ns =
+  string file (namespace file ns).namespace_name
+
+let string_of_ns_set file set =
+  Array.to_list (ns_set file set) |>
+  List.map (string_of_namespace file) |>
+  String.concat ", " |>
+  Printf.sprintf "{%s}"
+
+let rec string_of_multiname file name =
+  match multiname file name with
+  | QName { qname_ns; qname_name } | QNameA { qname_ns; qname_name } ->
+    Printf.sprintf "%s::%s" (string_of_namespace file qname_ns) (string file qname_name)
+  | RTQName { rtqname_name } | RTQNameA { rtqname_name } ->
+    Printf.sprintf "?::%s"  (string file rtqname_name)
+  | RTQNameL | RTQNameLA ->
+    "?::?"
+  | Multiname { multiname_ns_set; multiname_name }
+  | MultinameA { multiname_ns_set; multiname_name } ->
+    Printf.sprintf "%s::%s" (string_of_ns_set file multiname_ns_set) (string file multiname_name)
+  | MultinameL { multinamel_ns_set } | MultinameLA { multinamel_ns_set } ->
+    Printf.sprintf "%s::?" (string_of_ns_set file multinamel_ns_set)
+  | GenericName { genericname_name; genericname_params } ->
+    let params = List.map (string_of_multiname file) (Array.to_list genericname_params) in
+    Printf.sprintf "%s<%s>" (string_of_multiname file genericname_name) (String.concat ", " params)
+
+let string_of_opcode file opcode =
+  let integer      = integer  file in
+  let uinteger     = uinteger file in
+  let double       = double   file in
+  let lit_string s = Printf.sprintf "\"%s\"" (String.escaped (string file s)) in
+  let multiname    = string_of_multiname file in
+  let namespace ns = Printf.sprintf "namespace %s" (string file (namespace file ns).namespace_name) in
+  let class_ cls   = Printf.sprintf "class %s" (multiname (instance file cls).instance_name) in
+  let method_ meth = Printf.sprintf "method #%d" meth in
+  match opcode with
+  | OpBkpt                -> "bkpt"
+  | OpNop                 -> "nop"
+  | OpThrow               -> "throw"
+  | OpGetSuper (name)     -> Printf.sprintf "getsuper %s" (multiname name)
+  | OpSetSuper (name)     -> Printf.sprintf "setsuper %s" (multiname name)
+  | OpDXNS (str)          -> Printf.sprintf "dxns %s" (lit_string str)
+  | OpDXNSLate            -> "dxnslate"
+  | OpKill (local)        -> Printf.sprintf "kill L%d" local
+  | OpLabel               -> "label"
+  | OpIfNlt (target)      -> Printf.sprintf "ifnlt $%04x" target
+  | OpIfNle (target)      -> Printf.sprintf "ifnle $%04x" target
+  | OpIfNgt (target)      -> Printf.sprintf "ifngt $%04x" target
+  | OpIfNge (target)      -> Printf.sprintf "ifnge $%04x" target
+  | OpJump (target)       -> Printf.sprintf "jump $%04x" target
+  | OpIfTrue (target)     -> Printf.sprintf "iftrue $%04x" target
+  | OpIfFalse (target)    -> Printf.sprintf "iffalse $%04x" target
+  | OpIfEq (target)       -> Printf.sprintf "ifeq $%04x" target
+  | OpIfNe (target)       -> Printf.sprintf "ifne $%04x" target
+  | OpIfLt (target)       -> Printf.sprintf "iflt $%04x" target
+  | OpIfLe (target)       -> Printf.sprintf "ifle $%04x" target
+  | OpIfGt (target)       -> Printf.sprintf "ifgt $%04x" target
+  | OpIfGe (target)       -> Printf.sprintf "ifge $%04x" target
+  | OpIfStrictEq (target) -> Printf.sprintf "ifstricteq $%04x" target
+  | OpIfStrictNe (target) -> Printf.sprintf "ifstrictne $%04x" target
+  | OpLookupSwitch (default, targets) ->
+                             let targets = List.map (Printf.sprintf "$%04x") (Array.to_list targets) in
+                             Printf.sprintf "lookupswitch $%04x (%s)" default (String.concat ", " targets)
+  | OpPushWith            -> "pushwith"
+  | OpPopScope            -> "popscope"
+  | OpNextName            -> "nextname"
+  | OpHasNext             -> "hasnext"
+  | OpPushNull            -> "pushnull"
+  | OpPushUndefined       -> "pushundefined"
+  | OpNextValue           -> "nextvalue"
+  | OpPushByte (num)      -> Printf.sprintf "pushbyte %d" num
+  | OpPushShort (num)     -> Printf.sprintf "pushshort %ld" num
+  | OpPushTrue            -> "pushtrue"
+  | OpPushFalse           -> "pushfalse"
+  | OpPushNan             -> "pushnan"
+  | OpPop                 -> "pop"
+  | OpDup                 -> "dup"
+  | OpSwap                -> "swap"
+  | OpPushString (str)    -> Printf.sprintf "pushstring %s" (lit_string str)
+  | OpPushInt (int)       -> Printf.sprintf "pushint %ld" (integer int)
+  | OpPushUint (uint)     -> Printf.sprintf "pushuint %s" (Uint32.to_string (uinteger uint))
+  | OpPushDouble (dbl)    -> Printf.sprintf "pushdouble %f" (double dbl)
+  | OpPushScope           -> "pushscope"
+  | OpPushNamespace (ns)  -> Printf.sprintf "pushnamespace [%s]" (namespace ns)
+  | OpHasNext2 (obj, reg) -> Printf.sprintf "hasnext2 L%d L%d" obj reg
+  | OpAlchemyLoadInt8     -> "loadint8"
+  | OpAlchemyLoadInt16    -> "loadint16"
+  | OpAlchemyLoadInt32    -> "loadint32"
+  | OpAlchemyLoadFloat32  -> "loadfloat32"
+  | OpAlchemyLoadFloat64  -> "loadfloat64"
+  | OpAlchemyStoreInt8    -> "storeint8"
+  | OpAlchemyStoreInt16   -> "storeint16"
+  | OpAlchemyStoreInt32   -> "storeint32"
+  | OpAlchemyStoreFloat32 -> "storefloat32"
+  | OpAlchemyStoreFloat64 -> "storefloat64"
+  | OpNewFunction (meth)  -> Printf.sprintf "newfunction %s" (method_ meth)
+  | OpCall (argc)         -> Printf.sprintf "call %d" argc
+  | OpConstruct (argc)    -> Printf.sprintf "construct %d" argc
+  | OpCallMethod (slot_id, argc)      -> Printf.sprintf "callmethod [#%d] %d" slot_id argc
+  | OpCallStatic (slot_id, argc)      -> Printf.sprintf "callstatic [#%d] %d" slot_id argc
+  | OpCallSuper (name, argc)          -> Printf.sprintf "callsuper [%s] %d" (multiname name) argc
+  | OpCallProperty (name, argc)       -> Printf.sprintf "callproperty [%s] %d" (multiname name) argc
+  | OpReturnVoid                      -> "returnvoid"
+  | OpReturnValue                     -> "returnvalue"
+  | OpConstructSuper (argc)           -> Printf.sprintf "constructsuper %d" argc
+  | OpConstructProperty (name, argc)  -> Printf.sprintf "constructproperty [%s] %d" (multiname name) argc
+  | OpCallPropertyLex (name, argc)    -> Printf.sprintf "callpropertylex [%s] %d" (multiname name) argc
+  | OpCallSuperVoid (name, argc)      -> Printf.sprintf "callsupervoid [%s] %d" (multiname name) argc
+  | OpCallPropertyVoid (name, argc)   -> Printf.sprintf "callpropertyvoid [%s] %d" (multiname name) argc
+  | OpAlchemyExtend1            -> "extend1"
+  | OpAlchemyExtend8            -> "extend8"
+  | OpAlchemyExtend16           -> "extend16"
+  | OpApplyType (argc)          -> Printf.sprintf "applytype %d" argc
+  | OpNewObject (argc)          -> Printf.sprintf "newobject %d" argc
+  | OpNewArray (argc)           -> Printf.sprintf "newarray %d" argc
+  | OpNewActivation             -> "newactivation"
+  | OpNewClass (cls)            -> Printf.sprintf "newclass [%s]" (class_ cls)
+  | OpGetDescendants (name)     -> Printf.sprintf "getdescendants [%s]" (multiname name)
+  | OpNewCatch (catch)          -> Printf.sprintf "newcatch [%d]" catch
+  | OpFindPropertyStrict (name) -> Printf.sprintf "findpropertystrict [%s]" (multiname name)
+  | OpFindProperty (name)       -> Printf.sprintf "findproperty [%s]" (multiname name)
+  | OpFindDef (name)            -> Printf.sprintf "finddef [%s]" (multiname name)
+  | OpGetLex (name)             -> Printf.sprintf "getlex [%s]" (multiname name)
+  | OpSetProperty (name)        -> Printf.sprintf "setproperty [%s]" (multiname name)
+  | OpGetLocal (local)          -> Printf.sprintf "getlocal L%d" local
+  | OpSetLocal (local)          -> Printf.sprintf "setlocal L%d" local
+  | OpGetGlobalScope            -> "getglobalscope"
+  | OpGetScopeObject (index)    -> Printf.sprintf "getscopeobject"
+  | OpGetProperty (name)        -> Printf.sprintf "getproperty [%s]" (multiname name)
+  | OpInitProperty (name)       -> Printf.sprintf "initproperty [%s]" (multiname name)
+  | OpDeleteProperty (name)     -> Printf.sprintf "deleteproperty [%s]" (multiname name)
+  | OpGetSlot (slot_id)         -> Printf.sprintf "getslot [#%d]" slot_id
+  | OpSetSlot (slot_id)         -> Printf.sprintf "setslot [#%d]" slot_id
+  | OpGetGlobalSlot (slot_id)   -> Printf.sprintf "getglobalslot [#%d]" slot_id
+  | OpSetGlobalSlot (slot_id)   -> Printf.sprintf "setglobalslot [#%d]" slot_id
+  | OpConvertS            -> "convert_s"
+  | OpEscXelem            -> "esc_xelem"
+  | OpEscXattr            -> "esc_xattr"
+  | OpConvertI            -> "convert_i"
+  | OpConvertU            -> "convert_u"
+  | OpConvertD            -> "convert_d"
+  | OpConvertB            -> "convert_b"
+  | OpConvertO            -> "convert_o"
+  | OpCheckFilter         -> "checkfilter"
+  | OpCoerce (name)       -> Printf.sprintf "coerce [%s]" (multiname name)
+  | OpCoerceB             -> "coerce_b"
+  | OpCoerceA             -> "coerce_a"
+  | OpCoerceI             -> "coerce_i"
+  | OpCoerceD             -> "coerce_d"
+  | OpCoerceS             -> "coerce_s"
+  | OpAsType (name)       -> Printf.sprintf "astype [%s]" (multiname name)
+  | OpAsTypeLate          -> "astypelate"
+  | OpCoerceO             -> "coerce_o"
+  | OpNegate              -> "negate"
+  | OpIncrement           -> "increment"
+  | OpIncLocal (local)    -> Printf.sprintf "inclocal L%d" local
+  | OpDecrement           -> "decrement"
+  | OpDecLocal (local)    -> Printf.sprintf "declocal L%d" local
+  | OpTypeOf              -> "typeof"
+  | OpNot                 -> "not"
+  | OpBitNot              -> "bitnot"
+  | OpAdd                 -> "add"
+  | OpSubtract            -> "subtract"
+  | OpMultiply            -> "multiply"
+  | OpDivide              -> "divide"
+  | OpModulo              -> "modulo"
+  | OpLshift              -> "lshift"
+  | OpRshift              -> "rshift"
+  | OpUrshift             -> "urshift"
+  | OpBitAnd              -> "bitand"
+  | OpBitOr               -> "bitor"
+  | OpBitXor              -> "bitxor"
+  | OpEquals              -> "equals"
+  | OpStrictEquals        -> "strictequals"
+  | OpLessThan            -> "lessthan"
+  | OpLessEquals          -> "lessequals"
+  | OpGreaterThan         -> "greaterthan"
+  | OpGreaterEquals       -> "greaterequals"
+  | OpInstanceOf          -> "instanceof"
+  | OpIsType (name)       -> Printf.sprintf "istype [%s]" (multiname name)
+  | OpIsTypeLate          -> "istypelate"
+  | OpIn                  -> "in"
+  | OpIncrementI          -> "increment_i"
+  | OpDecrementI          -> "decrement_i"
+  | OpIncLocalI (local)   -> Printf.sprintf "inclocal_i L%d" local
+  | OpDecLocalI (local)   -> Printf.sprintf "declocal_i L%d" local
+  | OpNegateI             -> "negate_i"
+  | OpAddI                -> "add_i"
+  | OpSubtractI           -> "subtract_i"
+  | OpMultiplyI           -> "multiply_i"
+  | OpGetLocal0           -> "getlocal_0"
+  | OpGetLocal1           -> "getlocal_1"
+  | OpGetLocal2           -> "getlocal_2"
+  | OpGetLocal3           -> "getlocal_3"
+  | OpSetLocal0           -> "setlocal_0"
+  | OpSetLocal1           -> "setlocal_1"
+  | OpSetLocal2           -> "setlocal_2"
+  | OpSetLocal3           -> "setlocal_3"
+  | OpDebug (ty, idx, reg, extra) ->
+                             begin match ty with
+                             | 1 (* DI_LOCAL *) ->
+                               Printf.sprintf "debug DI_LOCAL %s L%d" (lit_string idx) reg
+                             | _ -> Printf.sprintf "debug %d %d %d %d" ty idx reg extra
+                             end
+  | OpDebugLine (line)    -> Printf.sprintf "debugline %d" line
+  | OpDebugFile (fname)   -> Printf.sprintf "debugfile %s" (lit_string fname)
+  | OpBkptLine            -> "bkptline"
+  | OpTimestamp           -> "timestamp"
+
+let disassemble file opcodes =
+  opcodes |>
+  Array.mapi (fun idx opcode ->
+    Printf.sprintf "%04x: %s" idx (string_of_opcode file opcode)) |>
+  Array.to_list |>
+  String.concat "\n"
+
+let rec read_some r f n =
+  let rec loop n rest =
+    if n > 0 then loop (n - 1) ((f ()) :: rest) else rest
+  in
+  Array.of_list (List.rev (loop n []))
+
+let read_array r f =
+  read_some r f (Reader.read_u30 r)
+
+let load_code input =
+  let r = Reader.create input in
+  let read_some = read_some r in
+  let read_opcode map_offset =
+    let offset = Reader.offset r in
+    let map_jump byte = map_offset (offset + 4 + byte) in
+    match Reader.read_u8 r with
+    | 0x01 -> OpBkpt
+    | 0x02 -> OpNop
+    | 0x03 -> OpThrow
+    | 0x04 -> OpGetSuper     ((* u30 property *) Reader.read_u30 r)
+    | 0x05 -> OpSetSuper     ((* u30 property *) Reader.read_u30 r)
+    | 0x06 -> OpDXNS         ((* u30 string *) Reader.read_u30 r)
+    | 0x07 -> OpDXNSLate
+    | 0x08 -> OpKill         ((* u30 local_index *) Reader.read_u30 r)
+    | 0x09 -> OpLabel
+    | 0x0C -> OpIfNlt        ((* s24 target *) map_jump (Reader.read_s24 r))
+    | 0x0D -> OpIfNle        ((* s24 target *) map_jump (Reader.read_s24 r))
+    | 0x0E -> OpIfNgt        ((* s24 target *) map_jump (Reader.read_s24 r))
+    | 0x0F -> OpIfNge        ((* s24 target *) map_jump (Reader.read_s24 r))
+    | 0x10 -> OpJump         ((* s24 target *) map_jump (Reader.read_s24 r))
+    | 0x11 -> OpIfTrue       ((* s24 target *) map_jump (Reader.read_s24 r))
+    | 0x12 -> OpIfFalse      ((* s24 target *) map_jump (Reader.read_s24 r))
+    | 0x13 -> OpIfEq         ((* s24 target *) map_jump (Reader.read_s24 r))
+    | 0x14 -> OpIfNe         ((* s24 target *) map_jump (Reader.read_s24 r))
+    | 0x15 -> OpIfLt         ((* s24 target *) map_jump (Reader.read_s24 r))
+    | 0x16 -> OpIfLe         ((* s24 target *) map_jump (Reader.read_s24 r))
+    | 0x17 -> OpIfGt         ((* s24 target *) map_jump (Reader.read_s24 r))
+    | 0x18 -> OpIfGe         ((* s24 target *) map_jump (Reader.read_s24 r))
+    | 0x19 -> OpIfStrictEq   ((* s24 target *) map_jump (Reader.read_s24 r))
+    | 0x1A -> OpIfStrictNe   ((* s24 target *) map_jump (Reader.read_s24 r))
+    | 0x1B -> let default  = map_offset (offset + (Reader.read_s24 r)) in
+              let case_num = Reader.read_u30 r in
+              let cases    = read_some (fun () -> map_offset (offset + (Reader.read_s24 r)))
+                                       (case_num + 1) in
+              OpLookupSwitch ((* s24 default *) default,
+                              (* u30 case_count; s24[] case_offsets *) cases)
+    | 0x1C -> OpPushWith
+    | 0x1D -> OpPopScope
+    | 0x1E -> OpNextName
+    | 0x1F -> OpHasNext
+    | 0x20 -> OpPushNull
+    | 0x21 -> OpPushUndefined
+    | 0x23 -> OpNextValue
+    | 0x24 -> OpPushByte       ((* u8 value *) Reader.read_u8 r)
+    | 0x25 -> OpPushShort      ((* s32 value *) Reader.read_s32 r)
+    | 0x26 -> OpPushTrue
+    | 0x27 -> OpPushFalse
+    | 0x28 -> OpPushNan
+    | 0x29 -> OpPop
+    | 0x2A -> OpDup
+    | 0x2B -> OpSwap
+    | 0x2C -> OpPushString     ((* u30 value *) Reader.read_u30 r)
+    | 0x2D -> OpPushInt        ((* u30 value *) Reader.read_u30 r)
+    | 0x2E -> OpPushUint       ((* u30 value *) Reader.read_u30 r)
+    | 0x2F -> OpPushDouble     ((* u30 value *) Reader.read_u30 r)
+    | 0x30 -> OpPushScope
+    | 0x31 -> OpPushNamespace  ((* u30 ns *) Reader.read_u30 r)
+    | 0x32 -> let obj_reg = Reader.read_u30 r in
+              let idx_reg = Reader.read_u30 r in
+              OpHasNext2       ((* u30 obj_reg *) obj_reg, (* u30 idx_reg *) idx_reg)
+    | 0x35 -> OpAlchemyLoadInt8
+    | 0x36 -> OpAlchemyLoadInt16
+    | 0x37 -> OpAlchemyLoadInt32
+    | 0x38 -> OpAlchemyLoadFloat32
+    | 0x39 -> OpAlchemyLoadFloat64
+    | 0x3A -> OpAlchemyStoreInt8
+    | 0x3B -> OpAlchemyStoreInt16
+    | 0x3C -> OpAlchemyStoreInt32
+    | 0x3D -> OpAlchemyStoreFloat32
+    | 0x3E -> OpAlchemyStoreFloat64
+    | 0x40 -> OpNewFunction       ((* u30 method *) Reader.read_u30 r)
+    | 0x41 -> OpCall              ((* u30 argc *) Reader.read_u30 r)
+    | 0x42 -> OpConstruct         ((* u30 argc *) Reader.read_u30 r)
+    | 0x43 -> let slot_id = Reader.read_u30 r in
+              let argc    = Reader.read_u30 r in
+              OpCallMethod        ((* u30 slot_id *) slot_id, (* u30 argc *) argc)
+    | 0x44 -> let slot_id = Reader.read_u30 r in
+              let argc    = Reader.read_u30 r in
+              OpCallStatic        ((* u30 slot_id *) slot_id, (* u30 argc *) argc)
+    | 0x45 -> let prop    = Reader.read_u30 r in
+              let argc    = Reader.read_u30 r in
+              OpCallSuper         ((* u30 prop *) prop, (* u30 argc *) argc)
+    | 0x46 -> let prop    = Reader.read_u30 r in
+              let argc    = Reader.read_u30 r in
+              OpCallProperty      ((* u30 prop *) prop, (* u30 argc *) argc)
+    | 0x47 -> OpReturnVoid
+    | 0x48 -> OpReturnValue
+    | 0x49 -> OpConstructSuper    ((* u30 argc *) Reader.read_u30 r)
+    | 0x4A -> let prop    = Reader.read_u30 r in
+              let argc    = Reader.read_u30 r in
+              OpConstructProperty ((* u30 prop *) prop, (* u30 argc *) argc)
+    | 0x4C -> let prop    = Reader.read_u30 r in
+              let argc    = Reader.read_u30 r in
+              OpCallPropertyLex   ((* u30 prop *) prop, (* u30 argc *) argc)
+    | 0x4E -> let prop    = Reader.read_u30 r in
+              let argc    = Reader.read_u30 r in
+              OpCallSuperVoid     ((* u30 prop *) prop, (* u30 argc *) argc)
+    | 0x4F -> let prop    = Reader.read_u30 r in
+              let argc    = Reader.read_u30 r in
+              OpCallPropertyVoid  ((* u30 prop *) prop, (* u30 argc *) argc)
+    | 0x50 -> OpAlchemyExtend1
+    | 0x51 -> OpAlchemyExtend8
+    | 0x52 -> OpAlchemyExtend16
+    | 0x53 -> OpApplyType          ((* u30 argc *) Reader.read_u30 r)
+    | 0x55 -> OpNewObject          ((* u30 argc *) Reader.read_u30 r)
+    | 0x56 -> OpNewArray           ((* u30 argc *) Reader.read_u30 r)
+    | 0x57 -> OpNewActivation
+    | 0x58 -> OpNewClass           ((* u30 class *) Reader.read_u30 r)
+    | 0x59 -> OpGetDescendants     ((* u30 prop *) Reader.read_u30 r)
+    | 0x5A -> OpNewCatch           ((* u30 catch *) Reader.read_u30 r)
+    | 0x5D -> OpFindPropertyStrict ((* u30 prop *) Reader.read_u30 r)
+    | 0x5E -> OpFindProperty       ((* u30 prop *) Reader.read_u30 r)
+    | 0x5F -> OpFindDef            ((* u30 prop *) Reader.read_u30 r)
+    | 0x60 -> OpGetLex             ((* u30 prop *) Reader.read_u30 r)
+    | 0x61 -> OpSetProperty        ((* u30 prop *) Reader.read_u30 r)
+    | 0x62 -> OpGetLocal           ((* u30 local *) Reader.read_u30 r)
+    | 0x63 -> OpSetLocal           ((* u30 local *) Reader.read_u30 r)
+    | 0x64 -> OpGetGlobalScope
+    | 0x65 -> OpGetScopeObject     ((* u8 index *) Reader.read_u8 r)
+    | 0x66 -> OpGetProperty        ((* u30 prop *) Reader.read_u30 r)
+    | 0x68 -> OpInitProperty       ((* u30 prop *) Reader.read_u30 r)
+    | 0x6A -> OpDeleteProperty     ((* u30 prop *) Reader.read_u30 r)
+    | 0x6C -> OpGetSlot            ((* u30 slot_id *) Reader.read_u30 r)
+    | 0x6D -> OpSetSlot            ((* u30 slot_id *) Reader.read_u30 r)
+    | 0x6E -> OpGetGlobalSlot      ((* u30 slot_id *) Reader.read_u30 r)
+    | 0x6F -> OpSetGlobalSlot      ((* u30 slot_id *) Reader.read_u30 r)
+    | 0x70 -> OpConvertS
+    | 0x71 -> OpEscXelem
+    | 0x72 -> OpEscXattr
+    | 0x73 -> OpConvertI
+    | 0x74 -> OpConvertU
+    | 0x75 -> OpConvertD
+    | 0x76 -> OpConvertB
+    | 0x77 -> OpConvertO
+    | 0x78 -> OpCheckFilter
+    | 0x80 -> OpCoerce       ((* u30 type *) Reader.read_u30 r)
+    | 0x81 -> OpCoerceB
+    | 0x82 -> OpCoerceA
+    | 0x83 -> OpCoerceI
+    | 0x84 -> OpCoerceD
+    | 0x85 -> OpCoerceS
+    | 0x86 -> OpAsType       ((* u30 type *) Reader.read_u30 r)
+    | 0x87 -> OpAsTypeLate
+    | 0x89 -> OpCoerceO
+    | 0x90 -> OpNegate
+    | 0x91 -> OpIncrement
+    | 0x92 -> OpIncLocal     ((* u30 local *) Reader.read_u30 r)
+    | 0x93 -> OpDecrement
+    | 0x94 -> OpDecLocal     ((* u30 local *) Reader.read_u30 r)
+    | 0x95 -> OpTypeOf
+    | 0x96 -> OpNot
+    | 0x97 -> OpBitNot
+    | 0xA0 -> OpAdd
+    | 0xA1 -> OpSubtract
+    | 0xA2 -> OpMultiply
+    | 0xA3 -> OpDivide
+    | 0xA4 -> OpModulo
+    | 0xA5 -> OpLshift
+    | 0xA6 -> OpRshift
+    | 0xA7 -> OpUrshift
+    | 0xA8 -> OpBitAnd
+    | 0xA9 -> OpBitOr
+    | 0xAA -> OpBitXor
+    | 0xAB -> OpEquals
+    | 0xAC -> OpStrictEquals
+    | 0xAD -> OpLessThan
+    | 0xAE -> OpLessEquals
+    | 0xAF -> OpGreaterThan
+    | 0xB0 -> OpGreaterEquals
+    | 0xB1 -> OpInstanceOf
+    | 0xB2 -> OpIsType       ((* u30 type *) Reader.read_u30 r)
+    | 0xB3 -> OpIsTypeLate
+    | 0xB4 -> OpIn
+    | 0xC0 -> OpIncrementI
+    | 0xC1 -> OpDecrementI
+    | 0xC2 -> OpIncLocalI    ((* u30 local *) Reader.read_u30 r)
+    | 0xC3 -> OpDecLocalI    ((* u30 local *) Reader.read_u30 r)
+    | 0xC4 -> OpNegateI
+    | 0xC5 -> OpAddI
+    | 0xC6 -> OpSubtractI
+    | 0xC7 -> OpMultiplyI
+    | 0xD0 -> OpGetLocal0
+    | 0xD1 -> OpGetLocal1
+    | 0xD2 -> OpGetLocal2
+    | 0xD3 -> OpGetLocal3
+    | 0xD4 -> OpSetLocal0
+    | 0xD5 -> OpSetLocal1
+    | 0xD6 -> OpSetLocal2
+    | 0xD7 -> OpSetLocal3
+    | 0xEF -> let ty    = Reader.read_u8  r in
+              let idx   = Reader.read_u30 r in
+              let reg   = Reader.read_u8  r in
+              let extra = Reader.read_u30 r in
+              OpDebug        ((* u8 type *) ty, (* u30 idx *) idx, (* u8 reg *) reg, (* u30 extra *) extra)
+    | 0xF0 -> OpDebugLine    ((* u30 line *) Reader.read_u30 r)
+    | 0xF1 -> OpDebugFile    ((* u30 file *) Reader.read_u30 r)
+    | 0xF2 -> OpBkptLine
+    | 0xF3 -> OpTimestamp
+    | opco -> failwith (Printf.sprintf "read_opcode: unknown opcode 0x%02x" opco)
+  in
+  (* Create a map of byte offsets -> instruction numbers *)
+  let index = Array.make (String.length input) (-1) in
+  let rec make_index n =
+    if Reader.at_end r then ()
+    else begin
+      index.(Reader.offset r) <- n;
+      ignore (read_opcode (fun x -> x));
+      make_index (n + 1)
+    end
+  in
+  make_index 0;
+  Reader.rewind r;
+  (* Actually read the opcodes *)
+  let rec make_opcodes rest =
+    if Reader.at_end r then rest
+    else
+      let map_index byte =
+        let opcode = index.(byte) in
+        assert (opcode <> (-1));
+        opcode
+      in
+      make_opcodes ((read_opcode map_index) :: rest)
+  in
+  index, Array.of_list (List.rev (make_opcodes []))
+
 let load_file input =
   let r = Reader.create input in
-  let rec read_some f cnt =
-    let rec loop cnt rest =
-      if cnt > 0 then loop (cnt - 1) ((f ()) :: rest) else rest
-    in
-    Array.of_list (List.rev (loop cnt []))
-  in
-  let read_array f =
-    read_some f (Reader.read_u30 r)
-  in
+  let read_some  f n = read_some  r f n in
+  let read_array f   = read_array r f in
   (* abcFile {
       u16 minor_version
       u16 major_version
@@ -755,15 +1413,15 @@ let load_file input =
     let local_count      = Reader.read_u30 r in
     let init_scope_depth = Reader.read_u30 r in
     let max_scope_depth  = Reader.read_u30 r in
-    let code             = read_string () in
-    let exceptions       = read_array read_exception in
+    let index, opcodes   = load_code (read_string ()) in
+    let exceptions       = read_array (read_exception index) in
     let traits           = read_array read_trait in
     { body_method           = method_idx;
       body_max_stack        = max_stack;
       body_local_count      = local_count;
       body_init_scope_depth = init_scope_depth;
       body_max_scope_depth  = max_scope_depth;
-      body_code             = code;
+      body_code             = opcodes;
       body_exceptions       = exceptions;
       body_traits           = traits; }
   (* exception_info {
@@ -773,10 +1431,15 @@ let load_file input =
     u30 exc_type
     u30 var_name
     } *)
-  and read_exception () =
-    let from_pc   = Reader.read_u30 r in
-    let to_pc     = Reader.read_u30 r in
-    let target_pc = Reader.read_u30 r in
+  and read_exception index () =
+    let map_offset byte =
+      let opcode = index.(byte) in
+      assert (opcode <> (-1));
+      opcode
+    in
+    let from_pc   = map_offset (Reader.read_u30 r) in
+    let to_pc     = map_offset (Reader.read_u30 r) in
+    let target_pc = map_offset (Reader.read_u30 r) in
     let exc_type  = Reader.read_u30 r in
     let var_name  = Reader.read_u30 r in
     { exception_from     = from_pc;
@@ -787,20 +1450,201 @@ let load_file input =
   in
   read_file ()
 
+let write_array w f arr =
+  Writer.write_u30 w (Array.length arr);
+  Array.iter f arr
+
+let dump_code opcodes =
+  let w = Writer.create () in
+  let write_opcode index opcode =
+    let offset = Writer.offset w in
+    let map_offset num = index.(num) - (offset + 4) in
+    let map_case num = index.(num) - offset in
+    match opcode with
+    | OpBkpt                -> Writer.write_u8 w 0x01
+    | OpNop                 -> Writer.write_u8 w 0x02
+    | OpThrow               -> Writer.write_u8 w 0x03
+    | OpGetSuper (name)     -> Writer.write_u8 w 0x04; Writer.write_u30 w name
+    | OpSetSuper (name)     -> Writer.write_u8 w 0x05; Writer.write_u30 w name
+    | OpDXNS (str)          -> Writer.write_u8 w 0x06; Writer.write_u30 w str
+    | OpDXNSLate            -> Writer.write_u8 w 0x07
+    | OpKill (local)        -> Writer.write_u8 w 0x08; Writer.write_u30 w local
+    | OpLabel               -> Writer.write_u8 w 0x09
+    | OpIfNlt (target)      -> Writer.write_u8 w 0x0C; Writer.write_s24 w (map_offset target)
+    | OpIfNle (target)      -> Writer.write_u8 w 0x0D; Writer.write_s24 w (map_offset target)
+    | OpIfNgt (target)      -> Writer.write_u8 w 0x0E; Writer.write_s24 w (map_offset target)
+    | OpIfNge (target)      -> Writer.write_u8 w 0x0F; Writer.write_s24 w (map_offset target)
+    | OpJump (target)       -> Writer.write_u8 w 0x10; Writer.write_s24 w (map_offset target)
+    | OpIfTrue (target)     -> Writer.write_u8 w 0x11; Writer.write_s24 w (map_offset target)
+    | OpIfFalse (target)    -> Writer.write_u8 w 0x12; Writer.write_s24 w (map_offset target)
+    | OpIfEq (target)       -> Writer.write_u8 w 0x13; Writer.write_s24 w (map_offset target)
+    | OpIfNe (target)       -> Writer.write_u8 w 0x14; Writer.write_s24 w (map_offset target)
+    | OpIfLt (target)       -> Writer.write_u8 w 0x15; Writer.write_s24 w (map_offset target)
+    | OpIfLe (target)       -> Writer.write_u8 w 0x16; Writer.write_s24 w (map_offset target)
+    | OpIfGt (target)       -> Writer.write_u8 w 0x17; Writer.write_s24 w (map_offset target)
+    | OpIfGe (target)       -> Writer.write_u8 w 0x18; Writer.write_s24 w (map_offset target)
+    | OpIfStrictEq (target) -> Writer.write_u8 w 0x19; Writer.write_s24 w (map_offset target)
+    | OpIfStrictNe (target) -> Writer.write_u8 w 0x1A; Writer.write_s24 w (map_offset target)
+    | OpLookupSwitch (default, cases) ->
+                               Writer.write_u8 w 0x1B; Writer.write_s24 w (map_case default);
+                               Writer.write_u30 w (Array.length cases - 1);
+                               Array.iter (fun case -> Writer.write_s24 w (map_case case)) cases
+    | OpPushWith            -> Writer.write_u8 w 0x1C
+    | OpPopScope            -> Writer.write_u8 w 0x1D
+    | OpNextName            -> Writer.write_u8 w 0x1E
+    | OpHasNext             -> Writer.write_u8 w 0x1F
+    | OpPushNull            -> Writer.write_u8 w 0x20
+    | OpPushUndefined       -> Writer.write_u8 w 0x21
+    | OpNextValue           -> Writer.write_u8 w 0x23
+    | OpPushByte (byte)     -> Writer.write_u8 w 0x24; Writer.write_u8 w byte
+    | OpPushShort (short)   -> Writer.write_u8 w 0x25; Writer.write_s32 w short
+    | OpPushTrue            -> Writer.write_u8 w 0x26
+    | OpPushFalse           -> Writer.write_u8 w 0x27
+    | OpPushNan             -> Writer.write_u8 w 0x28
+    | OpPop                 -> Writer.write_u8 w 0x29
+    | OpDup                 -> Writer.write_u8 w 0x2A
+    | OpSwap                -> Writer.write_u8 w 0x2B
+    | OpPushString (str)    -> Writer.write_u8 w 0x2C; Writer.write_u30 w str
+    | OpPushInt (int)       -> Writer.write_u8 w 0x2D; Writer.write_u30 w int
+    | OpPushUint (uint)     -> Writer.write_u8 w 0x2E; Writer.write_u30 w uint
+    | OpPushDouble (dbl)    -> Writer.write_u8 w 0x2F; Writer.write_u30 w dbl
+    | OpPushScope           -> Writer.write_u8 w 0x30
+    | OpPushNamespace (ns)  -> Writer.write_u8 w 0x31; Writer.write_u30 w ns
+    | OpHasNext2 (obj, reg) -> Writer.write_u8 w 0x32; Writer.write_u30 w obj; Writer.write_u30 w reg
+    | OpAlchemyLoadInt8     -> Writer.write_u8 w 0x35
+    | OpAlchemyLoadInt16    -> Writer.write_u8 w 0x36
+    | OpAlchemyLoadInt32    -> Writer.write_u8 w 0x37
+    | OpAlchemyLoadFloat32  -> Writer.write_u8 w 0x38
+    | OpAlchemyLoadFloat64  -> Writer.write_u8 w 0x39
+    | OpAlchemyStoreInt8    -> Writer.write_u8 w 0x3A
+    | OpAlchemyStoreInt16   -> Writer.write_u8 w 0x3B
+    | OpAlchemyStoreInt32   -> Writer.write_u8 w 0x3C
+    | OpAlchemyStoreFloat32 -> Writer.write_u8 w 0x3D
+    | OpAlchemyStoreFloat64 -> Writer.write_u8 w 0x3E
+    | OpNewFunction (meth)  -> Writer.write_u8 w 0x40; Writer.write_u30 w meth
+    | OpCall (argc)                     -> Writer.write_u8 w 0x41; Writer.write_u30 w argc
+    | OpConstruct (argc)                -> Writer.write_u8 w 0x42; Writer.write_u30 w argc
+    | OpCallMethod (slot_id, argc)      -> Writer.write_u8 w 0x43; Writer.write_u30 w slot_id; Writer.write_u30 w argc
+    | OpCallStatic (slot_id, argc)      -> Writer.write_u8 w 0x44; Writer.write_u30 w slot_id; Writer.write_u30 w argc
+    | OpCallSuper (prop, argc)          -> Writer.write_u8 w 0x45; Writer.write_u30 w prop; Writer.write_u30 w argc
+    | OpCallProperty (prop, argc)       -> Writer.write_u8 w 0x46; Writer.write_u30 w prop; Writer.write_u30 w argc
+    | OpReturnVoid                      -> Writer.write_u8 w 0x47
+    | OpReturnValue                     -> Writer.write_u8 w 0x48
+    | OpConstructSuper (argc)           -> Writer.write_u8 w 0x49; Writer.write_u30 w argc
+    | OpConstructProperty (prop, argc)  -> Writer.write_u8 w 0x4A; Writer.write_u30 w prop; Writer.write_u30 w argc
+    | OpCallPropertyLex (prop, argc)    -> Writer.write_u8 w 0x4C; Writer.write_u30 w prop; Writer.write_u30 w argc
+    | OpCallSuperVoid (prop, argc)      -> Writer.write_u8 w 0x4E; Writer.write_u30 w prop; Writer.write_u30 w argc
+    | OpCallPropertyVoid (prop, argc)   -> Writer.write_u8 w 0x4F; Writer.write_u30 w prop; Writer.write_u30 w argc
+    | OpAlchemyExtend1            -> Writer.write_u8 w 0x50
+    | OpAlchemyExtend8            -> Writer.write_u8 w 0x51
+    | OpAlchemyExtend16           -> Writer.write_u8 w 0x52
+    | OpApplyType (argc)          -> Writer.write_u8 w 0x53; Writer.write_u30 w argc
+    | OpNewObject (argc)          -> Writer.write_u8 w 0x55; Writer.write_u30 w argc
+    | OpNewArray (argc)           -> Writer.write_u8 w 0x56; Writer.write_u30 w argc
+    | OpNewActivation             -> Writer.write_u8 w 0x57
+    | OpNewClass (cls)            -> Writer.write_u8 w 0x58; Writer.write_u30 w cls
+    | OpGetDescendants (prop)     -> Writer.write_u8 w 0x59; Writer.write_u30 w prop
+    | OpNewCatch (catch)          -> Writer.write_u8 w 0x5A; Writer.write_u30 w catch
+    | OpFindPropertyStrict (prop) -> Writer.write_u8 w 0x5D; Writer.write_u30 w prop
+    | OpFindProperty (prop)       -> Writer.write_u8 w 0x5E; Writer.write_u30 w prop
+    | OpFindDef (prop)            -> Writer.write_u8 w 0x5F; Writer.write_u30 w prop
+    | OpGetLex (prop)             -> Writer.write_u8 w 0x60; Writer.write_u30 w prop
+    | OpSetProperty (prop)        -> Writer.write_u8 w 0x61; Writer.write_u30 w prop
+    | OpGetLocal (local)          -> Writer.write_u8 w 0x62; Writer.write_u30 w local
+    | OpSetLocal (local)          -> Writer.write_u8 w 0x63; Writer.write_u30 w local
+    | OpGetGlobalScope            -> Writer.write_u8 w 0x64
+    | OpGetScopeObject (index)    -> Writer.write_u8 w 0x65; Writer.write_u30 w index
+    | OpGetProperty (prop)        -> Writer.write_u8 w 0x66; Writer.write_u30 w prop
+    | OpInitProperty (prop)       -> Writer.write_u8 w 0x68; Writer.write_u30 w prop
+    | OpDeleteProperty (prop)     -> Writer.write_u8 w 0x6A; Writer.write_u30 w prop
+    | OpGetSlot (slot_id)         -> Writer.write_u8 w 0x6C; Writer.write_u30 w slot_id
+    | OpSetSlot (slot_id)         -> Writer.write_u8 w 0x6D; Writer.write_u30 w slot_id
+    | OpGetGlobalSlot (slot_id)   -> Writer.write_u8 w 0x6E; Writer.write_u30 w slot_id
+    | OpSetGlobalSlot (slot_id)   -> Writer.write_u8 w 0x6F; Writer.write_u30 w slot_id
+    | OpConvertS          -> Writer.write_u8 w 0x70
+    | OpEscXelem          -> Writer.write_u8 w 0x71
+    | OpEscXattr          -> Writer.write_u8 w 0x72
+    | OpConvertI          -> Writer.write_u8 w 0x73
+    | OpConvertU          -> Writer.write_u8 w 0x74
+    | OpConvertD          -> Writer.write_u8 w 0x75
+    | OpConvertB          -> Writer.write_u8 w 0x76
+    | OpConvertO          -> Writer.write_u8 w 0x77
+    | OpCheckFilter       -> Writer.write_u8 w 0x78
+    | OpCoerce (name)     -> Writer.write_u8 w 0x80; Writer.write_u30 w name
+    | OpCoerceB           -> Writer.write_u8 w 0x81
+    | OpCoerceA           -> Writer.write_u8 w 0x82
+    | OpCoerceI           -> Writer.write_u8 w 0x83
+    | OpCoerceD           -> Writer.write_u8 w 0x84
+    | OpCoerceS           -> Writer.write_u8 w 0x85
+    | OpAsType (name)     -> Writer.write_u8 w 0x86; Writer.write_u30 w name
+    | OpAsTypeLate        -> Writer.write_u8 w 0x87
+    | OpCoerceO           -> Writer.write_u8 w 0x89
+    | OpNegate            -> Writer.write_u8 w 0x90
+    | OpIncrement         -> Writer.write_u8 w 0x91
+    | OpIncLocal (local)  -> Writer.write_u8 w 0x92; Writer.write_u30 w local
+    | OpDecrement         -> Writer.write_u8 w 0x93
+    | OpDecLocal (local)  -> Writer.write_u8 w 0x94; Writer.write_u30 w local
+    | OpTypeOf            -> Writer.write_u8 w 0x95
+    | OpNot               -> Writer.write_u8 w 0x96
+    | OpBitNot            -> Writer.write_u8 w 0x97
+    | OpAdd               -> Writer.write_u8 w 0xA0
+    | OpSubtract          -> Writer.write_u8 w 0xA1
+    | OpMultiply          -> Writer.write_u8 w 0xA2
+    | OpDivide            -> Writer.write_u8 w 0xA3
+    | OpModulo            -> Writer.write_u8 w 0xA4
+    | OpLshift            -> Writer.write_u8 w 0xA5
+    | OpRshift            -> Writer.write_u8 w 0xA6
+    | OpUrshift           -> Writer.write_u8 w 0xA7
+    | OpBitAnd            -> Writer.write_u8 w 0xA8
+    | OpBitOr             -> Writer.write_u8 w 0xA9
+    | OpBitXor            -> Writer.write_u8 w 0xAA
+    | OpEquals            -> Writer.write_u8 w 0xAB
+    | OpStrictEquals      -> Writer.write_u8 w 0xAC
+    | OpLessThan          -> Writer.write_u8 w 0xAD
+    | OpLessEquals        -> Writer.write_u8 w 0xAE
+    | OpGreaterThan       -> Writer.write_u8 w 0xAF
+    | OpGreaterEquals     -> Writer.write_u8 w 0xB0
+    | OpInstanceOf        -> Writer.write_u8 w 0xB1
+    | OpIsType (ty)       -> Writer.write_u8 w 0xB2; Writer.write_u30 w ty
+    | OpIsTypeLate        -> Writer.write_u8 w 0xB3
+    | OpIn                -> Writer.write_u8 w 0xB4
+    | OpIncrementI        -> Writer.write_u8 w 0xC0
+    | OpDecrementI        -> Writer.write_u8 w 0xC1
+    | OpIncLocalI (local) -> Writer.write_u8 w 0xC2; Writer.write_u30 w local
+    | OpDecLocalI (local) -> Writer.write_u8 w 0xC3; Writer.write_u30 w local
+    | OpNegateI           -> Writer.write_u8 w 0xC4
+    | OpAddI              -> Writer.write_u8 w 0xC5
+    | OpSubtractI         -> Writer.write_u8 w 0xC6
+    | OpMultiplyI         -> Writer.write_u8 w 0xC7
+    | OpGetLocal0         -> Writer.write_u8 w 0xD0
+    | OpGetLocal1         -> Writer.write_u8 w 0xD1
+    | OpGetLocal2         -> Writer.write_u8 w 0xD2
+    | OpGetLocal3         -> Writer.write_u8 w 0xD3
+    | OpSetLocal0         -> Writer.write_u8 w 0xD4
+    | OpSetLocal1         -> Writer.write_u8 w 0xD5
+    | OpSetLocal2         -> Writer.write_u8 w 0xD6
+    | OpSetLocal3         -> Writer.write_u8 w 0xD7
+    | OpDebug (ty, idx, reg, extra) ->
+                             Writer.write_u8 w 0xEF; Writer.write_u8 w ty;  Writer.write_u30 w idx;
+                                                     Writer.write_u8 w reg; Writer.write_u30 w extra
+    | OpDebugLine (line)  -> Writer.write_u8 w 0xF0; Writer.write_u30 w line
+    | OpDebugFile (file)  -> Writer.write_u8 w 0xF1; Writer.write_u30 w file
+    | OpBkptLine          -> Writer.write_u8 w 0xF2
+    | OpTimestamp         -> Writer.write_u8 w 0xF3
+  in
+  (* Build an index *)
+  let index = Array.create (Array.length opcodes) (-1) in
+  opcodes |> Array.iteri (fun num opcode ->
+    index.(num) <- Writer.offset w;
+    write_opcode index opcode);
+  Writer.clear w;
+  (* Write opcodes *)
+  Array.iter (write_opcode index) opcodes;
+  index, Writer.to_string w
+
 let dump_file file =
   let w = Writer.create () in
-  let rec write_some f arr =
-    let rec loop lst =
-      match lst with
-      | elem :: rest -> f elem; loop rest
-      | [] -> ()
-    in
-    loop (Array.to_list arr)
-  in
-  let write_array f arr =
-    Writer.write_u30 w (Array.length arr);
-    write_some f arr
-  in
+  let write_array f arr = write_array w f arr in
   (* abcFile {
       u16 minor_version
       u16 major_version
@@ -825,8 +1669,8 @@ let dump_file file =
     write_array write_metadata file.file_metadata;
     assert ((Array.length file.file_instances) = (Array.length file.file_classes));
     Writer.write_u30 w (Array.length file.file_instances);
-    write_some write_instance file.file_instances;
-    write_some write_class file.file_classes;
+    Array.iter write_instance file.file_instances;
+    Array.iter write_class file.file_classes;
     write_array write_script file.file_scripts;
     write_array write_method_body file.file_method_bodies
   (* cpool_info {
@@ -852,7 +1696,7 @@ let dump_file file =
         Writer.write_u30 w 0
       else
         Writer.write_u30 w ((Array.length arr) + 1);
-      write_some f arr
+      Array.iter f arr
     in
     write_array (Writer.write_s32 w) pool.const_pool_integers;
     write_array (Writer.write_u32 w) pool.const_pool_uintegers;
@@ -969,7 +1813,7 @@ let dump_file file =
   and write_method meth =
     Writer.write_u30 w (Array.length meth.method_param_types);
     Writer.write_u30 w meth.method_return_type;
-    write_some (Writer.write_u30 w) meth.method_param_types;
+    Array.iter (Writer.write_u30 w) meth.method_param_types;
     Writer.write_u30 w meth.method_name;
     (* NEED_ARGUMENTS  0x01
        NEED_ACTIVATION 0x02
@@ -993,7 +1837,7 @@ let dump_file file =
     Option.may (write_array write_default) meth.method_defaults;
     Option.may (fun param_names ->
         assert ((Array.length param_names) = (Array.length meth.method_param_types));
-        write_some write_string param_names)
+        Array.iter write_string param_names)
       meth.method_param_names
   (* option_detail {
       u30 val
@@ -1060,7 +1904,7 @@ let dump_file file =
     Writer.write_u8 w (flags lor kind);
     Writer.write_u30 w trait.trait_slot_id;
     data_writer ();
-    Option.map (write_array (Writer.write_u30 w)) trait.trait_metadata
+    Option.may (write_array (Writer.write_u30 w)) trait.trait_metadata
   (* trait_slot {
       u30 slot_id
       u30 type_name
@@ -1139,8 +1983,9 @@ let dump_file file =
     Writer.write_u30 w body.body_local_count;
     Writer.write_u30 w body.body_init_scope_depth;
     Writer.write_u30 w body.body_max_scope_depth;
-    write_string body.body_code;
-    write_array write_exception body.body_exceptions;
+    let index, code = dump_code body.body_code in
+    write_string code;
+    write_array (write_exception index) body.body_exceptions;
     write_array write_trait body.body_traits
   (* exception_info {
     u30 from
@@ -1149,12 +1994,15 @@ let dump_file file =
     u30 exc_type
     u30 var_name
     } *)
-  and write_exception exc =
-    Writer.write_u30 w exc.exception_from;
-    Writer.write_u30 w exc.exception_to;
-    Writer.write_u30 w exc.exception_target;
+  and write_exception index exc =
+    Writer.write_u30 w index.(exc.exception_from);
+    Writer.write_u30 w index.(exc.exception_to);
+    Writer.write_u30 w index.(exc.exception_target);
     Writer.write_u30 w exc.exception_type;
     Writer.write_u30 w exc.exception_var_name
   in
   write_file file;
   Writer.to_string w
+
+let dump_code opcodes =
+  assert false
