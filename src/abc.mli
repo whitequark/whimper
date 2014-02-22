@@ -65,6 +65,8 @@ and ns_kind =
 | NSKindStaticProtectedNS
 | NSKindPrivateNS
 and ns_set = namespace_ref array
+(* Those constants ending in "A" (such as CONSTANT_QNameA) represent
+   the names of attributes. *)
 and multiname =
 | QName        of multiname_qname
 | QNameA       of multiname_qname
@@ -236,15 +238,15 @@ and opcode =
 | (* 0x42; argc + 1 -> 1 *) OpConstruct         of (* u30 argc *) int
 | (* 0x43; argc + 1 -> 1 *) OpCallMethod        of (* u30 slot_id *) int * (* u30 argc *) int
 | (* 0x44; argc + 1 -> 1 *) OpCallStatic        of (* u30 slot_id *) int * (* u30 argc *) int
-| (* 0x45; argc     -> 1 *) OpCallSuper         of (* u30 prop *) multiname_ref * (* u30 argc *) int
-| (* 0x46; argc     -> 1 *) OpCallProperty      of (* u30 prop *) multiname_ref * (* u30 argc *) int
+| (* 0x45; argc + 1 -> 1 *) OpCallSuper         of (* u30 prop *) multiname_ref * (* u30 argc *) int
+| (* 0x46; argc + 1 -> 1 *) OpCallProperty      of (* u30 prop *) multiname_ref * (* u30 argc *) int
 | (* 0x47; 0 -> 0 *) OpReturnVoid
 | (* 0x48; 1 -> 0 *) OpReturnValue
 | (* 0x49; argc + 1 -> 0 *) OpConstructSuper    of (* u30 argc *) int
-| (* 0x4A; argc     -> 1 *) OpConstructProperty of (* u30 prop *) multiname_ref * (* u30 argc *) int
-| (* 0x4C; argc     -> 1 *) OpCallPropertyLex   of (* u30 prop *) multiname_ref * (* u30 argc *) int
-| (* 0x4E; argc     -> 0 *) OpCallSuperVoid     of (* u30 prop *) multiname_ref * (* u30 argc *) int
-| (* 0x4F; argc     -> 0 *) OpCallPropertyVoid  of (* u30 prop *) multiname_ref * (* u30 argc *) int
+| (* 0x4A; argc + 1 -> 1 *) OpConstructProperty of (* u30 prop *) multiname_ref * (* u30 argc *) int
+| (* 0x4C; argc + 1 -> 1 *) OpCallPropertyLex   of (* u30 prop *) multiname_ref * (* u30 argc *) int
+| (* 0x4E; argc + 1 -> 0 *) OpCallSuperVoid     of (* u30 prop *) multiname_ref * (* u30 argc *) int
+| (* 0x4F; argc + 1 -> 0 *) OpCallPropertyVoid  of (* u30 prop *) multiname_ref * (* u30 argc *) int
 | (* 0x50; 1 -> 1 *) OpAlchemyExtend1
 | (* 0x51; 1 -> 1 *) OpAlchemyExtend8
 | (* 0x52; 1 -> 1 *) OpAlchemyExtend16
@@ -266,7 +268,7 @@ and opcode =
 | (* 0x65; 0 -> 1 *) OpGetScopeObject     of (* u8 index *) int
 | (* 0x66; 0 -> 1 *) OpGetProperty        of (* u30 prop *) multiname_ref
 | (* 0x68; 1 -> 0 *) OpInitProperty       of (* u30 prop *) multiname_ref
-| (* 0x6A; 0 -> 1 *) OpDeleteProperty     of (* u30 prop *) multiname_ref
+| (* 0x6A; 1 -> 1 *) OpDeleteProperty     of (* u30 prop *) multiname_ref
 | (* 0x6C; 1 -> 1 *) OpGetSlot            of (* u30 slot_id *) int
 | (* 0x6D; 2 -> 0 *) OpSetSlot            of (* u30 slot_id *) int
 | (* 0x6E; 0 -> 1 *) OpGetGlobalSlot      of (* u30 slot_id *) int (* Deprecated *)
@@ -363,6 +365,8 @@ val method_body : file -> method_body_ref -> method_body
 val string_of_namespace : file -> namespace_ref -> string
 val string_of_ns_set    : file -> ns_set_ref -> string
 val string_of_multiname : file -> multiname_ref -> string
+val string_of_method    : file -> method_ref -> string
+val string_of_class     : file -> class_ref -> string
 val string_of_opcode    : file -> opcode -> string
 
 val disassemble : file -> opcodes -> string

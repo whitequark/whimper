@@ -418,15 +418,15 @@ and opcode =
 | (* 0x42; argc + 1 -> 1 *) OpConstruct         of (* u30 argc *) int
 | (* 0x43; argc + 1 -> 1 *) OpCallMethod        of (* u30 slot_id *) int * (* u30 argc *) int
 | (* 0x44; argc + 1 -> 1 *) OpCallStatic        of (* u30 slot_id *) int * (* u30 argc *) int
-| (* 0x45; argc     -> 1 *) OpCallSuper         of (* u30 prop *) multiname_ref * (* u30 argc *) int
-| (* 0x46; argc     -> 1 *) OpCallProperty      of (* u30 prop *) multiname_ref * (* u30 argc *) int
+| (* 0x45; argc + 1 -> 1 *) OpCallSuper         of (* u30 prop *) multiname_ref * (* u30 argc *) int
+| (* 0x46; argc + 1 -> 1 *) OpCallProperty      of (* u30 prop *) multiname_ref * (* u30 argc *) int
 | (* 0x47; 0 -> 0 *) OpReturnVoid
 | (* 0x48; 1 -> 0 *) OpReturnValue
 | (* 0x49; argc + 1 -> 0 *) OpConstructSuper    of (* u30 argc *) int
-| (* 0x4A; argc     -> 1 *) OpConstructProperty of (* u30 prop *) multiname_ref * (* u30 argc *) int
-| (* 0x4C; argc     -> 1 *) OpCallPropertyLex   of (* u30 prop *) multiname_ref * (* u30 argc *) int
-| (* 0x4E; argc     -> 0 *) OpCallSuperVoid     of (* u30 prop *) multiname_ref * (* u30 argc *) int
-| (* 0x4F; argc     -> 0 *) OpCallPropertyVoid  of (* u30 prop *) multiname_ref * (* u30 argc *) int
+| (* 0x4A; argc + 1 -> 1 *) OpConstructProperty of (* u30 prop *) multiname_ref * (* u30 argc *) int
+| (* 0x4C; argc + 1 -> 1 *) OpCallPropertyLex   of (* u30 prop *) multiname_ref * (* u30 argc *) int
+| (* 0x4E; argc + 1 -> 0 *) OpCallSuperVoid     of (* u30 prop *) multiname_ref * (* u30 argc *) int
+| (* 0x4F; argc + 1 -> 0 *) OpCallPropertyVoid  of (* u30 prop *) multiname_ref * (* u30 argc *) int
 | (* 0x50; 1 -> 1 *) OpAlchemyExtend1
 | (* 0x51; 1 -> 1 *) OpAlchemyExtend8
 | (* 0x52; 1 -> 1 *) OpAlchemyExtend16
@@ -586,15 +586,21 @@ let rec string_of_multiname file name =
     let params = List.map (string_of_multiname file) (Array.to_list genericname_params) in
     Printf.sprintf "%s<%s>" (string_of_multiname file genericname_name) (String.concat ", " params)
 
+let string_of_method file meth =
+  Printf.sprintf "#%d" meth
+
+let string_of_class file cls =
+  string_of_multiname file (instance file cls).instance_name
+
 let string_of_opcode file opcode =
   let integer      = integer  file in
   let uinteger     = uinteger file in
   let double       = double   file in
   let lit_string s = Printf.sprintf "\"%s\"" (String.escaped (string file s)) in
   let multiname    = string_of_multiname file in
-  let namespace ns = Printf.sprintf "namespace %s" (string file (namespace file ns).namespace_name) in
-  let class_ cls   = Printf.sprintf "class %s" (multiname (instance file cls).instance_name) in
-  let method_ meth = Printf.sprintf "method #%d" meth in
+  let namespace ns = string_of_namespace file ns in
+  let method_ meth = string_of_method file meth in
+  let class_ cls   = string_of_class file cls in
   match opcode with
   | OpBkpt                -> "bkpt"
   | OpNop                 -> "nop"
@@ -655,7 +661,7 @@ let string_of_opcode file opcode =
   | OpAlchemyStoreInt32   -> "storeint32"
   | OpAlchemyStoreFloat32 -> "storefloat32"
   | OpAlchemyStoreFloat64 -> "storefloat64"
-  | OpNewFunction (meth)  -> Printf.sprintf "newfunction %s" (method_ meth)
+  | OpNewFunction (meth)  -> Printf.sprintf "newfunction [%s]" (method_ meth)
   | OpCall (argc)         -> Printf.sprintf "call %d" argc
   | OpConstruct (argc)    -> Printf.sprintf "construct %d" argc
   | OpCallMethod (slot_id, argc)      -> Printf.sprintf "callmethod [#%d] %d" slot_id argc
@@ -665,10 +671,10 @@ let string_of_opcode file opcode =
   | OpReturnVoid                      -> "returnvoid"
   | OpReturnValue                     -> "returnvalue"
   | OpConstructSuper (argc)           -> Printf.sprintf "constructsuper %d" argc
-  | OpConstructProperty (name, argc)  -> Printf.sprintf "constructproperty [%s] %d" (multiname name) argc
-  | OpCallPropertyLex (name, argc)    -> Printf.sprintf "callpropertylex [%s] %d" (multiname name) argc
+  | OpConstructProperty (name, argc)  -> Printf.sprintf "constructprop [%s] %d" (multiname name) argc
+  | OpCallPropertyLex (name, argc)    -> Printf.sprintf "callproplex [%s] %d" (multiname name) argc
   | OpCallSuperVoid (name, argc)      -> Printf.sprintf "callsupervoid [%s] %d" (multiname name) argc
-  | OpCallPropertyVoid (name, argc)   -> Printf.sprintf "callpropertyvoid [%s] %d" (multiname name) argc
+  | OpCallPropertyVoid (name, argc)   -> Printf.sprintf "callpropvoid [%s] %d" (multiname name) argc
   | OpAlchemyExtend1            -> "extend1"
   | OpAlchemyExtend8            -> "extend8"
   | OpAlchemyExtend16           -> "extend16"
@@ -679,7 +685,7 @@ let string_of_opcode file opcode =
   | OpNewClass (cls)            -> Printf.sprintf "newclass [%s]" (class_ cls)
   | OpGetDescendants (name)     -> Printf.sprintf "getdescendants [%s]" (multiname name)
   | OpNewCatch (catch)          -> Printf.sprintf "newcatch [%d]" catch
-  | OpFindPropertyStrict (name) -> Printf.sprintf "findpropertystrict [%s]" (multiname name)
+  | OpFindPropertyStrict (name) -> Printf.sprintf "findpropstrict [%s]" (multiname name)
   | OpFindProperty (name)       -> Printf.sprintf "findproperty [%s]" (multiname name)
   | OpFindDef (name)            -> Printf.sprintf "finddef [%s]" (multiname name)
   | OpGetLex (name)             -> Printf.sprintf "getlex [%s]" (multiname name)
@@ -2003,6 +2009,3 @@ let dump_file file =
   in
   write_file file;
   Writer.to_string w
-
-let dump_code opcodes =
-  assert false
